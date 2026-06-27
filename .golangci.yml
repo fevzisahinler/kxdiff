@@ -1,0 +1,47 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: standard
+  enable:
+    - errcheck
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - gocyclo
+    - misspell
+    - revive
+    - gosec
+    - bodyclose
+    - nilerr
+    - errorlint
+  settings:
+    gocyclo:
+      min-complexity: 15
+    revive:
+      rules:
+        - name: exported
+        - name: error-strings
+        - name: context-as-argument
+    gosec:
+      excludes:
+        - G104
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - gocyclo
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/fevzisahinler/kxdiff
