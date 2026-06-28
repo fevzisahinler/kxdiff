@@ -1,25 +1,23 @@
 // Package diff computes the field-level differences between two normalized
-// objects. It is pure: same input, same output, no side effects.
+// objects. It is pure: same input, same output, no side effects. From/To in
+// each FieldDiff carry the raw values (typed), with an absent side as nil;
+// formatting for display is the renderer's job.
 package diff
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"sort"
-	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/fevzisahinler/kxdiff/internal/model"
 )
 
-// absent renders a value missing on one side.
-const absent = "<none>"
-
 // Objects compares two objects and returns the fields that differ, sorted by
 // path. Lists whose elements all have a "name" are matched by name (so
-// containers/env/volumes don't show spurious diffs when reordered).
+// containers/env/volumes don't show spurious diffs when reordered); other lists
+// of maps are matched positionally.
 func Objects(from, to *unstructured.Unstructured) []model.FieldDiff {
 	var diffs []model.FieldDiff
 	walk("", from.Object, to.Object, &diffs)
@@ -41,7 +39,7 @@ func walk(path string, from, to any, diffs *[]model.FieldDiff) {
 		}
 	}
 	if !reflect.DeepEqual(from, to) {
-		*diffs = append(*diffs, model.FieldDiff{Path: path, From: render(from), To: render(to)})
+		*diffs = append(*diffs, model.FieldDiff{Path: path, From: from, To: to})
 	}
 }
 
@@ -54,9 +52,9 @@ func walkMaps(path string, from, to map[string]any, diffs *[]model.FieldDiff) {
 		case fok && tok:
 			walk(child, fv, tv, diffs)
 		case fok:
-			*diffs = append(*diffs, model.FieldDiff{Path: child, From: render(fv), To: absent})
+			*diffs = append(*diffs, model.FieldDiff{Path: child, From: fv, To: nil})
 		default:
-			*diffs = append(*diffs, model.FieldDiff{Path: child, From: absent, To: render(tv)})
+			*diffs = append(*diffs, model.FieldDiff{Path: child, From: nil, To: tv})
 		}
 	}
 }
@@ -69,7 +67,7 @@ func walkSlices(path string, from, to []any, diffs *[]model.FieldDiff) {
 		walkIndexedSlices(path, from, to, diffs)
 	default:
 		if !reflect.DeepEqual(from, to) {
-			*diffs = append(*diffs, model.FieldDiff{Path: path, From: render(from), To: render(to)})
+			*diffs = append(*diffs, model.FieldDiff{Path: path, From: from, To: to})
 		}
 	}
 }
@@ -85,16 +83,15 @@ func walkNamedSlices(path string, from, to []any, diffs *[]model.FieldDiff) {
 		case fok && tok:
 			walk(child, fv, tv, diffs)
 		case fok:
-			*diffs = append(*diffs, model.FieldDiff{Path: child, From: render(fv), To: absent})
+			*diffs = append(*diffs, model.FieldDiff{Path: child, From: fv, To: nil})
 		default:
-			*diffs = append(*diffs, model.FieldDiff{Path: child, From: absent, To: render(tv)})
+			*diffs = append(*diffs, model.FieldDiff{Path: child, From: nil, To: tv})
 		}
 	}
 }
 
 // walkIndexedSlices matches list-of-maps elements positionally — used for lists
-// whose elements have no "name" (e.g. RBAC rules), so the diff points at the
-// changed field instead of dumping the whole list.
+// whose elements have no "name" (e.g. RBAC rules).
 func walkIndexedSlices(path string, from, to []any, diffs *[]model.FieldDiff) {
 	n := len(from)
 	if len(to) > n {
@@ -106,24 +103,11 @@ func walkIndexedSlices(path string, from, to []any, diffs *[]model.FieldDiff) {
 		case i < len(from) && i < len(to):
 			walk(child, from[i], to[i], diffs)
 		case i < len(from):
-			*diffs = append(*diffs, model.FieldDiff{Path: child, From: render(from[i]), To: absent})
+			*diffs = append(*diffs, model.FieldDiff{Path: child, From: from[i], To: nil})
 		default:
-			*diffs = append(*diffs, model.FieldDiff{Path: child, From: absent, To: render(to[i])})
+			*diffs = append(*diffs, model.FieldDiff{Path: child, From: nil, To: to[i]})
 		}
 	}
-}
-
-// isMapList reports whether every element is a map (a list of objects).
-func isMapList(list []any) bool {
-	if len(list) == 0 {
-		return false
-	}
-	for _, el := range list {
-		if _, ok := el.(map[string]any); !ok {
-			return false
-		}
-	}
-	return true
 }
 
 // isNamedList reports whether every element is a map carrying a string "name".
@@ -137,6 +121,19 @@ func isNamedList(list []any) bool {
 			return false
 		}
 		if _, ok := m["name"].(string); !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// isMapList reports whether every element is a map (a list of objects).
+func isMapList(list []any) bool {
+	if len(list) == 0 {
+		return false
+	}
+	for _, el := range list {
+		if _, ok := el.(map[string]any); !ok {
 			return false
 		}
 	}
@@ -173,39 +170,4 @@ func joinPath(parent, key string) string {
 		return key
 	}
 	return parent + "." + key
-}
-
-func render(v any) string {
-	switch t := v.(type) {
-	case nil:
-		return absent
-	case map[string]any:
-		return jsonRender(v)
-	case []any:
-		return renderList(t)
-	default:
-		return fmt.Sprintf("%v", v)
-	}
-}
-
-// renderList renders a list readably: scalars as "[a, b, c]", nested
-// maps/lists as compact JSON.
-func renderList(list []any) string {
-	parts := make([]string, len(list))
-	for i, el := range list {
-		switch el.(type) {
-		case map[string]any, []any:
-			parts[i] = jsonRender(el)
-		default:
-			parts[i] = fmt.Sprintf("%v", el)
-		}
-	}
-	return "[" + strings.Join(parts, ", ") + "]"
-}
-
-func jsonRender(v any) string {
-	if b, err := json.Marshal(v); err == nil {
-		return string(b)
-	}
-	return fmt.Sprintf("%v", v)
 }

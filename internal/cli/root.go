@@ -1,7 +1,8 @@
 // Package cli wires up the kxdiff command-line interface (cobra).
 //
 // It resolves the --from/--to flags against the kubeconfig, connects to each
-// cluster, fetches and normalizes objects, then matches and diffs them.
+// cluster, fetches and normalizes objects, then matches and diffs them and
+// renders the result as text, JSON or markdown.
 package cli
 
 import (
@@ -9,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -42,6 +42,7 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 		from             string
 		to               string
 		kubeconfig       string
+		output           string
 		includeGenerated bool
 		revealSecrets    bool
 		noColor          bool
@@ -63,6 +64,9 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := validateOutput(output); err != nil {
+				return err
+			}
 			kc, err := config.LoadKubeconfig(kubeconfig)
 			if err != nil {
 				return err
@@ -77,9 +81,9 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 				IncludeSystemNamespaces: allNamespaces,
 			}
 			normOpts := normalize.Options{DropNamespace: true, RevealSecrets: revealSecrets}
-			p := palette{enabled: useColor(noColor)}
 			view := viewOptions{quiet: quiet, onlyFrom: onlyFrom, onlyTo: onlyTo, onlyDiff: onlyDiff}
-			return runDiff(cmd.Context(), cmd.OutOrStdout(), p, view, kubeconfig, fromEnv, toEnv, fetchOpts, normOpts)
+			p := palette{enabled: useColor(noColor)}
+			return runDiff(cmd.Context(), cmd.OutOrStdout(), p, view, output, kubeconfig, fromEnv, toEnv, fetchOpts, normOpts)
 		},
 	}
 
@@ -92,6 +96,7 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 	cmd.Flags().StringVar(&to, "to", "", "target environment: [context][/namespace]")
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "",
 		"path to the kubeconfig file (overrides KUBECONFIG and the default)")
+	cmd.Flags().StringVarP(&output, "output", "o", "text", "output format: text, json or markdown")
 	cmd.Flags().BoolVarP(&allNamespaces, "all-namespaces", "A", false,
 		"in whole-context mode, also compare system namespaces (kube-system, ...)")
 	cmd.Flags().BoolVar(&includeGenerated, "include-generated", false,
@@ -125,14 +130,20 @@ func Execute(info BuildInfo) int {
 	}
 }
 
-// parseSelectors turns positional TYPE[/NAME] arguments into discovery selectors.
-func parseSelectors(args []string) []discovery.Selector {
-	out := make([]discovery.Selector, 0, len(args))
-	for _, a := range args {
-		typ, name, _ := strings.Cut(a, "/")
-		out = append(out, discovery.Selector{Type: typ, Name: name})
+const (
+	outputText     = "text"
+	outputJSON     = "json"
+	outputMarkdown = "markdown"
+)
+
+func validateOutput(output string) error {
+	switch output {
+	case "", outputText, outputJSON, outputMarkdown:
+		return nil
+	default:
+		return fmt.Errorf("invalid --output %q (want %s, %s or %s)",
+			output, outputText, outputJSON, outputMarkdown)
 	}
-	return out
 }
 
 // resolveBoth resolves the --from and --to values against the kubeconfig,
@@ -149,9 +160,19 @@ func resolveBoth(kc config.Kubeconfig, from, to string) (model.Environment, mode
 	return fromEnv, toEnv, nil
 }
 
-// runDiff fetches both environments, matches their objects, diffs matched pairs
-// and prints the report. It returns errDifferencesFound when anything differs.
-func runDiff(ctx context.Context, out io.Writer, p palette, view viewOptions, kubeconfigPath string, from, to model.Environment, fetchOpts fetch.Options, normOpts normalize.Options) error {
+// parseSelectors turns positional TYPE[/NAME] arguments into discovery selectors.
+func parseSelectors(args []string) []discovery.Selector {
+	out := make([]discovery.Selector, 0, len(args))
+	for _, a := range args {
+		typ, name, _ := strings.Cut(a, "/")
+		out = append(out, discovery.Selector{Type: typ, Name: name})
+	}
+	return out
+}
+
+// runDiff fetches both environments, builds the diff report and renders it.
+// It returns errDifferencesFound when anything differs.
+func runDiff(ctx context.Context, out io.Writer, p palette, view viewOptions, output, kubeconfigPath string, from, to model.Environment, fetchOpts fetch.Options, normOpts normalize.Options) error {
 	fromRes, err := fetchEnvironment(ctx, kubeconfigPath, from, fetchOpts)
 	if err != nil {
 		return fmt.Errorf("from: %w", err)
@@ -165,13 +186,25 @@ func runDiff(ctx context.Context, out io.Writer, p palette, view viewOptions, ku
 	// otherwise namespace<->namespace comparisons must line up by name alone.
 	includeNamespace := from.Namespace == "" && to.Namespace == ""
 	m := match.Match(fromRes.Objects, toRes.Objects, includeNamespace)
-
 	differing, same := diffPairs(m.Both, normOpts)
-	if err := printReport(out, p, view, from, to, fromRes, toRes, m, differing, same); err != nil {
-		return err
+
+	report := model.DiffReport{
+		From:     envLabel(from),
+		To:       envLabel(to),
+		OnlyFrom: toRefs(m.OnlyFrom),
+		OnlyTo:   toRefs(m.OnlyTo),
+		Differs:  differing,
+		Same:     same,
+		Warnings: combineWarnings(envLabel(from), fromRes.Warnings, envLabel(to), toRes.Warnings),
 	}
 
-	if len(m.OnlyFrom) > 0 || len(m.OnlyTo) > 0 || len(differing) > 0 {
+	if !view.quiet {
+		if err := renderReport(out, p, view, output, report); err != nil {
+			return err
+		}
+	}
+
+	if len(report.OnlyFrom) > 0 || len(report.OnlyTo) > 0 || len(report.Differs) > 0 {
 		return errDifferencesFound
 	}
 	return nil
@@ -203,16 +236,10 @@ func fetchEnvironment(ctx context.Context, kubeconfigPath string, env model.Envi
 	return res, nil
 }
 
-// resourceChange is a matched resource whose content differs.
-type resourceChange struct {
-	ref    string
-	fields []model.FieldDiff
-}
-
 // diffPairs normalizes and diffs each matched pair, returning the ones that
 // differ and a count of those that are identical after normalization.
-func diffPairs(pairs []match.Pair, opts normalize.Options) ([]resourceChange, int) {
-	var differing []resourceChange
+func diffPairs(pairs []match.Pair, opts normalize.Options) ([]model.ResourceDiff, int) {
+	var differing []model.ResourceDiff
 	same := 0
 	for _, p := range pairs {
 		fields := diff.Objects(normalize.Normalize(p.From, opts), normalize.Normalize(p.To, opts))
@@ -220,135 +247,30 @@ func diffPairs(pairs []match.Pair, opts normalize.Options) ([]resourceChange, in
 			same++
 			continue
 		}
-		differing = append(differing, resourceChange{ref: ref(p.From), fields: fields})
+		differing = append(differing, model.ResourceDiff{
+			Kind:   p.From.GetKind(),
+			Name:   p.From.GetName(),
+			Fields: fields,
+		})
 	}
 	return differing, same
 }
 
-// viewOptions controls how much of the report is printed.
-type viewOptions struct {
-	quiet    bool
-	onlyFrom bool
-	onlyTo   bool
-	onlyDiff bool
+func combineWarnings(fromLabel string, fromW []string, toLabel string, toW []string) []string {
+	out := make([]string, 0, len(fromW)+len(toW))
+	for _, w := range fromW {
+		out = append(out, fmt.Sprintf("(%s) %s", fromLabel, w))
+	}
+	for _, w := range toW {
+		out = append(out, fmt.Sprintf("(%s) %s", toLabel, w))
+	}
+	return out
 }
 
-// sections reports which output sections to show. With no --only-* flag all are
-// shown; otherwise only the selected ones.
-func (v viewOptions) sections() (from, to, diff bool) {
-	if !v.onlyFrom && !v.onlyTo && !v.onlyDiff {
-		return true, true, true
-	}
-	return v.onlyFrom, v.onlyTo, v.onlyDiff
-}
-
-// printReport renders the diff: a summary header, any warnings, and the
-// requested sections. With --quiet nothing is printed (the exit code carries
-// the result).
-func printReport(out io.Writer, p palette, v viewOptions, from, to model.Environment, fromRes, toRes fetch.Result, m match.Result, differing []resourceChange, same int) error {
-	if v.quiet {
-		return nil
-	}
-	lw := &lineWriter{w: out}
-	fromLabel, toLabel := envLabel(from), envLabel(to)
-
-	lw.printf("%s %s  <->  %s\n", p.bold("ENVIRONMENTS:"), fromLabel, toLabel)
-	lw.printf("only in %s: %d | only in %s: %d | differs: %d | same: %d\n",
-		fromLabel, len(m.OnlyFrom), toLabel, len(m.OnlyTo), len(differing), same)
-
-	for _, w := range fromRes.Warnings {
-		lw.printf("  warning (%s): %s\n", fromLabel, w)
-	}
-	for _, w := range toRes.Warnings {
-		lw.printf("  warning (%s): %s\n", toLabel, w)
-	}
-
-	showFrom, showTo, showDiff := v.sections()
-	if showFrom {
-		printBucket(lw, p, "only in "+fromLabel, refs(m.OnlyFrom), p.red)
-	}
-	if showTo {
-		printBucket(lw, p, "only in "+toLabel, refs(m.OnlyTo), p.green)
-	}
-	if showDiff {
-		lw.printf("\n%s\n", p.bold("differs:"))
-		if len(differing) == 0 {
-			lw.printf("  (none)\n")
-		}
-		for _, c := range differing {
-			lw.printf("  %s\n", p.yellow(c.ref))
-			for _, f := range c.fields {
-				printField(lw, p, f)
-			}
-		}
-	}
-	return lw.err
-}
-
-// printField prints one field diff. Single-line values are shown inline; a
-// multi-line value (e.g. an embedded config file) is shown as a line block with
-// only the changed lines.
-func printField(lw *lineWriter, p palette, f model.FieldDiff) {
-	if strings.Contains(f.From, "\n") || strings.Contains(f.To, "\n") {
-		lw.printf("      %s:\n", f.Path)
-		removed, added := lineDiff(f.From, f.To)
-		for _, line := range removed {
-			lw.printf("        %s\n", p.red("- "+line))
-		}
-		for _, line := range added {
-			lw.printf("        %s\n", p.green("+ "+line))
-		}
-		return
-	}
-	lw.printf("      %s  %s → %s\n", f.Path, p.red(f.From), p.green(f.To))
-}
-
-// lineDiff returns the lines present only in from (removed) and only in to
-// (added), preserving order; lines common to both are omitted.
-func lineDiff(from, to string) (removed, added []string) {
-	fromLines := strings.Split(from, "\n")
-	toLines := strings.Split(to, "\n")
-	inFrom, inTo := lineSet(fromLines), lineSet(toLines)
-	for _, l := range fromLines {
-		if !inTo[l] {
-			removed = append(removed, l)
-		}
-	}
-	for _, l := range toLines {
-		if !inFrom[l] {
-			added = append(added, l)
-		}
-	}
-	return removed, added
-}
-
-func lineSet(lines []string) map[string]bool {
-	set := make(map[string]bool, len(lines))
-	for _, l := range lines {
-		set[l] = true
-	}
-	return set
-}
-
-func printBucket(lw *lineWriter, p palette, title string, items []string, color func(string) string) {
-	lw.printf("\n%s\n", p.bold(title+":"))
-	if len(items) == 0 {
-		lw.printf("  (none)\n")
-		return
-	}
-	for _, it := range items {
-		lw.printf("  %s\n", color(it))
-	}
-}
-
-func ref(o *unstructured.Unstructured) string {
-	return o.GetKind() + "/" + o.GetName()
-}
-
-func refs(objs []*unstructured.Unstructured) []string {
-	out := make([]string, 0, len(objs))
+func toRefs(objs []*unstructured.Unstructured) []model.ResourceRef {
+	out := make([]model.ResourceRef, 0, len(objs))
 	for _, o := range objs {
-		out = append(out, ref(o))
+		out = append(out, model.ResourceRef{Kind: o.GetKind(), Name: o.GetName()})
 	}
 	return out
 }
@@ -358,49 +280,4 @@ func envLabel(e model.Environment) string {
 		return e.Context
 	}
 	return e.Context + "/" + e.Namespace
-}
-
-// lineWriter writes formatted lines to w, remembering the first write error so
-// callers can check it once at the end.
-type lineWriter struct {
-	w   io.Writer
-	err error
-}
-
-func (lw *lineWriter) printf(format string, args ...any) {
-	if lw.err == nil {
-		_, lw.err = fmt.Fprintf(lw.w, format, args...)
-	}
-}
-
-// palette renders ANSI colours, or plain text when disabled.
-type palette struct{ enabled bool }
-
-func (p palette) red(s string) string    { return p.wrap("31", s) }
-func (p palette) green(s string) string  { return p.wrap("32", s) }
-func (p palette) yellow(s string) string { return p.wrap("33", s) }
-func (p palette) bold(s string) string   { return p.wrap("1", s) }
-
-func (p palette) wrap(code, s string) string {
-	if !p.enabled {
-		return s
-	}
-	return "\x1b[" + code + "m" + s + "\x1b[0m"
-}
-
-// useColor decides whether to colour output: off when --no-color or NO_COLOR is
-// set, or when stdout is not a terminal (piped / redirected).
-func useColor(noColor bool) bool {
-	if noColor || os.Getenv("NO_COLOR") != "" {
-		return false
-	}
-	return isTerminal(os.Stdout)
-}
-
-func isTerminal(f *os.File) bool {
-	info, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	return info.Mode()&os.ModeCharDevice != 0
 }

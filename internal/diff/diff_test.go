@@ -1,6 +1,7 @@
 package diff
 
 import (
+	"reflect"
 	"testing"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -62,11 +63,11 @@ func TestObjects_AddedAndRemoved(t *testing.T) {
 	if len(diffs) != 2 {
 		t.Fatalf("expected 2 diffs, got %+v", diffs)
 	}
-	if diffs[0].To != absent {
-		t.Errorf("only_from should be absent on the to side: %+v", diffs[0])
+	if diffs[0].To != nil {
+		t.Errorf("only_from should be absent (nil) on the to side: %+v", diffs[0])
 	}
-	if diffs[1].From != absent {
-		t.Errorf("only_to should be absent on the from side: %+v", diffs[1])
+	if diffs[1].From != nil {
+		t.Errorf("only_to should be absent (nil) on the from side: %+v", diffs[1])
 	}
 }
 
@@ -92,8 +93,9 @@ func TestObjects_IndexedMapListAndReadableScalars(t *testing.T) {
 	if diffs[0].Path != "rules[0].resources" {
 		t.Errorf("path = %q, want rules[0].resources", diffs[0].Path)
 	}
-	if diffs[0].From != "[configmaps]" || diffs[0].To != "[configmaps, secrets]" {
-		t.Errorf("readable scalar list expected, got %+v", diffs[0])
+	if !reflect.DeepEqual(diffs[0].From, []any{"configmaps"}) ||
+		!reflect.DeepEqual(diffs[0].To, []any{"configmaps", "secrets"}) {
+		t.Errorf("raw list values expected, got from=%#v to=%#v", diffs[0].From, diffs[0].To)
 	}
 	if diffs[1].Path != "rules[0].verbs" {
 		t.Errorf("path = %q, want rules[0].verbs", diffs[1].Path)
