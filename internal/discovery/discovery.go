@@ -22,6 +22,31 @@ type ResourceType struct {
 	Resource   string // plural name, e.g. "deployments"
 	Kind       string
 	Namespaced bool
+	Singular   string   // singular name, e.g. "deployment"
+	ShortNames []string // e.g. ["deploy"]
+}
+
+// Selector is a parsed TYPE[/NAME] positional argument.
+type Selector struct {
+	Type string // resource, kind, singular, short name, or "resource.group"
+	Name string // optional specific object name ("" = all of this type)
+}
+
+// Matches reports whether token refers to this type. token may be the plural
+// resource, the singular, the kind, a short name, or "resource.group" — all
+// case-insensitive, the way kubectl resolves a type.
+func (rt ResourceType) Matches(token string) bool {
+	t := strings.ToLower(token)
+	switch t {
+	case strings.ToLower(rt.Resource), strings.ToLower(rt.Singular), strings.ToLower(rt.Kind):
+		return true
+	}
+	for _, sn := range rt.ShortNames {
+		if t == strings.ToLower(sn) {
+			return true
+		}
+	}
+	return rt.Group != "" && t == strings.ToLower(rt.Resource+"."+rt.Group)
 }
 
 // GroupVersion renders the "group/version" (or just "version" for core types).
@@ -117,6 +142,8 @@ func filterListable(lists []*metav1.APIResourceList) []ResourceType {
 				Resource:   r.Name,
 				Kind:       r.Kind,
 				Namespaced: r.Namespaced,
+				Singular:   r.SingularName,
+				ShortNames: r.ShortNames,
 			})
 		}
 	}

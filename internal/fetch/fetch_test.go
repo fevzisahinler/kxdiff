@@ -162,3 +162,59 @@ func TestFetch_FiltersGeneratedTypesAndObjects(t *testing.T) {
 		t.Errorf("IncludeGenerated: expected 7 objects, got %v", kinds(resAll.Objects))
 	}
 }
+
+func TestFetch_TypeSelector(t *testing.T) {
+	lister := fakeLister{
+		lists: map[schema.GroupVersionResource]*unstructured.UnstructuredList{
+			gvr("apps", "v1", "deployments"): {Items: []unstructured.Unstructured{obj("apps/v1", "Deployment", "demo", "web")}},
+			gvr("", "v1", "configmaps"):      {Items: []unstructured.Unstructured{obj("v1", "ConfigMap", "demo", "app")}},
+		},
+	}
+	types := []discovery.ResourceType{
+		{Group: "apps", Version: "v1", Resource: "deployments", Kind: "Deployment", Singular: "deployment", ShortNames: []string{"deploy"}, Namespaced: true},
+		{Version: "v1", Resource: "configmaps", Kind: "ConfigMap", Singular: "configmap", ShortNames: []string{"cm"}, Namespaced: true},
+	}
+	env := model.Environment{Namespace: "demo"}
+
+	res, err := Fetch(context.Background(), lister, env, types, Options{Selectors: []discovery.Selector{{Type: "deploy"}}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := kinds(res.Objects); len(got) != 1 || got[0] != "Deployment/web" {
+		t.Errorf("type selector: got %v, want [Deployment/web]", got)
+	}
+}
+
+func TestFetch_NameSelector(t *testing.T) {
+	lister := fakeLister{
+		lists: map[schema.GroupVersionResource]*unstructured.UnstructuredList{
+			gvr("", "v1", "configmaps"): {Items: []unstructured.Unstructured{
+				obj("v1", "ConfigMap", "demo", "app"),
+				obj("v1", "ConfigMap", "demo", "other"),
+			}},
+		},
+	}
+	types := []discovery.ResourceType{
+		{Version: "v1", Resource: "configmaps", Kind: "ConfigMap", Singular: "configmap", Namespaced: true},
+	}
+
+	res, err := Fetch(context.Background(), lister, model.Environment{Namespace: "demo"}, types,
+		Options{Selectors: []discovery.Selector{{Type: "configmap", Name: "app"}}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := kinds(res.Objects); len(got) != 1 || got[0] != "ConfigMap/app" {
+		t.Errorf("name selector: got %v, want [ConfigMap/app]", got)
+	}
+}
+
+func TestFetch_UnknownSelector(t *testing.T) {
+	types := []discovery.ResourceType{
+		{Version: "v1", Resource: "configmaps", Kind: "ConfigMap", Namespaced: true},
+	}
+	_, err := Fetch(context.Background(), fakeLister{}, model.Environment{Namespace: "demo"}, types,
+		Options{Selectors: []discovery.Selector{{Type: "nonsense"}}})
+	if err == nil {
+		t.Fatal("expected an error for an unknown resource type")
+	}
+}

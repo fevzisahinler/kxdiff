@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -56,7 +57,7 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 		Version:       info.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			kc, err := config.LoadKubeconfig(kubeconfig)
 			if err != nil {
 				return err
@@ -65,7 +66,10 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fetchOpts := fetch.Options{IncludeGenerated: includeGenerated}
+			fetchOpts := fetch.Options{
+				IncludeGenerated: includeGenerated,
+				Selectors:        parseSelectors(args),
+			}
 			normOpts := normalize.Options{DropNamespace: true, RevealSecrets: revealSecrets}
 			p := palette{enabled: useColor(noColor)}
 			return runDiff(cmd.Context(), cmd.OutOrStdout(), p, kubeconfig, fromEnv, toEnv, fetchOpts, normOpts)
@@ -105,6 +109,16 @@ func Execute(info BuildInfo) int {
 		cmd.PrintErrln("Error:", err)
 		return 2
 	}
+}
+
+// parseSelectors turns positional TYPE[/NAME] arguments into discovery selectors.
+func parseSelectors(args []string) []discovery.Selector {
+	out := make([]discovery.Selector, 0, len(args))
+	for _, a := range args {
+		typ, name, _ := strings.Cut(a, "/")
+		out = append(out, discovery.Selector{Type: typ, Name: name})
+	}
+	return out
 }
 
 // resolveBoth resolves the --from and --to values against the kubeconfig,

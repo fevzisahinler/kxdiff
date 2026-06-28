@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -53,21 +54,48 @@ func TestFilterListable(t *testing.T) {
 		t.Fatalf("got %d types, want %d: %+v", len(got), len(want), got)
 	}
 	for i := range want {
-		if got[i] != want[i] {
+		if !reflect.DeepEqual(got[i], want[i]) {
 			t.Errorf("type[%d] = %+v, want %+v", i, got[i], want[i])
 		}
 	}
 }
 
 func TestResourceTypeString(t *testing.T) {
-	cases := map[ResourceType]string{
-		{Version: "v1", Resource: "namespaces", Namespaced: false}:                           "namespaces (v1, cluster)",
-		{Group: "apps", Version: "v1", Resource: "deployments", Namespaced: true}:            "deployments (apps/v1, namespaced)",
-		{Group: "stable.example.com", Version: "v1", Resource: "crontabs", Namespaced: true}: "crontabs (stable.example.com/v1, namespaced)",
+	cases := []struct {
+		rt   ResourceType
+		want string
+	}{
+		{ResourceType{Version: "v1", Resource: "namespaces", Namespaced: false}, "namespaces (v1, cluster)"},
+		{ResourceType{Group: "apps", Version: "v1", Resource: "deployments", Namespaced: true}, "deployments (apps/v1, namespaced)"},
+		{ResourceType{Group: "stable.example.com", Version: "v1", Resource: "crontabs", Namespaced: true}, "crontabs (stable.example.com/v1, namespaced)"},
 	}
-	for rt, want := range cases {
-		if got := rt.String(); got != want {
-			t.Errorf("String() = %q, want %q", got, want)
+	for _, c := range cases {
+		if got := c.rt.String(); got != c.want {
+			t.Errorf("String() = %q, want %q", got, c.want)
+		}
+	}
+}
+
+func TestResourceTypeMatches(t *testing.T) {
+	deploy := ResourceType{
+		Group: "apps", Version: "v1", Resource: "deployments",
+		Kind: "Deployment", Singular: "deployment", ShortNames: []string{"deploy"},
+	}
+	for _, token := range []string{"deployments", "deployment", "Deployment", "deploy", "deployments.apps", "DEPLOY"} {
+		if !deploy.Matches(token) {
+			t.Errorf("deployment should match %q", token)
+		}
+	}
+	for _, token := range []string{"svc", "pods", "deployment.extensions"} {
+		if deploy.Matches(token) {
+			t.Errorf("deployment should NOT match %q", token)
+		}
+	}
+
+	cr := ResourceType{Group: "stable.example.com", Version: "v1", Resource: "crontabs", Kind: "CronTab", Singular: "crontab"}
+	for _, token := range []string{"crontabs", "crontab", "crontabs.stable.example.com"} {
+		if !cr.Matches(token) {
+			t.Errorf("crontab should match %q", token)
 		}
 	}
 }

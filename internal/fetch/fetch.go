@@ -44,6 +44,10 @@ type Options struct {
 	// filtered out by default (Pods, ReplicaSets, Events, owned objects, the
 	// default ServiceAccount, the kube-root-ca.crt ConfigMap, ...).
 	IncludeGenerated bool
+	// Selectors restricts the fetch to specific TYPE[/NAME] arguments. When set,
+	// only matching types are fetched and the noise filter is bypassed for them
+	// (an explicit request wins over the default filtering).
+	Selectors []discovery.Selector
 }
 
 // Lister is the read-only slice of the dynamic client that fetch needs.
@@ -69,7 +73,10 @@ type Result struct {
 // or that do not support listing are skipped with a warning rather than failing
 // the whole fetch. Generated/system noise is dropped unless opts says otherwise.
 func Fetch(ctx context.Context, lister Lister, env model.Environment, types []discovery.ResourceType, opts Options) (Result, error) {
-	selected := selectTypes(types, env.Namespace != "", opts.IncludeGenerated)
+	if err := validateSelectors(types, opts.Selectors); err != nil {
+		return Result{}, err
+	}
+	selected := selectTypes(types, env.Namespace != "", opts)
 
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(maxConcurrentLists)
@@ -101,7 +108,7 @@ func Fetch(ctx context.Context, lister Lister, env model.Environment, types []di
 			mu.Lock()
 			for i := range list.Items {
 				item := &list.Items[i]
-				if opts.IncludeGenerated || keepObject(item) {
+				if keep(item, rt, opts) {
 					objects = append(objects, item)
 				}
 			}
@@ -120,19 +127,82 @@ func Fetch(ctx context.Context, lister Lister, env model.Environment, types []di
 }
 
 // selectTypes chooses which resource types to fetch: only namespaced types when
-// a namespace is set, and (by default) excluding generated noise types.
-func selectTypes(types []discovery.ResourceType, namespaceSet, includeGenerated bool) []discovery.ResourceType {
+// a namespace is set; when selectors are given, only matching types; otherwise
+// (by default) excluding generated noise types.
+func selectTypes(types []discovery.ResourceType, namespaceSet bool, opts Options) []discovery.ResourceType {
+	explicit := len(opts.Selectors) > 0
 	out := make([]discovery.ResourceType, 0, len(types))
 	for _, t := range types {
 		if namespaceSet && !t.Namespaced {
 			continue
 		}
-		if !includeGenerated && generatedResources[t.Resource] {
+		switch {
+		case explicit:
+			if !typeMatchesAnySelector(t, opts.Selectors) {
+				continue
+			}
+		case !opts.IncludeGenerated && generatedResources[t.Resource]:
 			continue
 		}
 		out = append(out, t)
 	}
 	return out
+}
+
+// keep reports whether an object should be included: the object-level noise
+// filter (owned/system objects) applies unless IncludeGenerated, and any name
+// selector must match. Explicit type selection only widens which *types* are
+// fetched (see selectTypes), not which individual objects survive noise filtering.
+func keep(o *unstructured.Unstructured, rt discovery.ResourceType, opts Options) bool {
+	if !opts.IncludeGenerated && !keepObject(o) {
+		return false
+	}
+	return nameAllowed(rt, o.GetName(), opts.Selectors)
+}
+
+// nameAllowed reports whether name passes the selectors' name restrictions for
+// this type. A selector with an empty Name allows every name of its type.
+func nameAllowed(rt discovery.ResourceType, name string, selectors []discovery.Selector) bool {
+	if len(selectors) == 0 {
+		return true
+	}
+	matchedNamed := false
+	for _, s := range selectors {
+		if !rt.Matches(s.Type) {
+			continue
+		}
+		if s.Name == "" || s.Name == name {
+			return true
+		}
+		matchedNamed = true
+	}
+	return !matchedNamed
+}
+
+func typeMatchesAnySelector(rt discovery.ResourceType, selectors []discovery.Selector) bool {
+	for _, s := range selectors {
+		if rt.Matches(s.Type) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateSelectors fails if a selector's type matches no known resource type.
+func validateSelectors(types []discovery.ResourceType, selectors []discovery.Selector) error {
+	for _, s := range selectors {
+		found := false
+		for _, t := range types {
+			if t.Matches(s.Type) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("unknown resource type %q", s.Type)
+		}
+	}
+	return nil
 }
 
 // keepObject reports whether an object is meaningful to diff: controller-owned
