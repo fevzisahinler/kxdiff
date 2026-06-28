@@ -6,8 +6,10 @@
 *.dylib
 /bin/
 /dist/
-kxdiff
-kubectl-kxdiff
+# Root-level build artifacts only — anchored with a leading slash so the
+# cmd/kxdiff/ source directory is NOT ignored.
+/kxdiff
+/kubectl-kxdiff
 
 # Test & coverage
 *.test
