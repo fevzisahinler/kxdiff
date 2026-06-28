@@ -5,6 +5,86 @@ import (
 	"testing"
 )
 
+func TestResolveEnvironment(t *testing.T) {
+	arn1 := "arn:aws:eks:us-east-1:111122223333:cluster/dev-main"
+	arn2 := "arn:aws:eks:us-east-1:444455556666:cluster/dev-karpenter-demo"
+	kc := Kubeconfig{
+		Contexts:       []string{arn1, arn2},
+		CurrentContext: arn2,
+	}
+
+	tests := []struct {
+		name        string
+		raw         string
+		wantCtx     string
+		wantNS      string
+		wantErr     bool
+		errContains []string
+	}{
+		{
+			name:    "full ARN context, all namespaces",
+			raw:     arn1,
+			wantCtx: arn1,
+			wantNS:  "",
+		},
+		{
+			name:    "ARN context with an explicit namespace",
+			raw:     arn1 + "/kube-system",
+			wantCtx: arn1,
+			wantNS:  "kube-system",
+		},
+		{
+			name:    "bare token is a namespace in the current context",
+			raw:     "default",
+			wantCtx: arn2, // current
+			wantNS:  "default",
+		},
+		{
+			name:    "leading slash is a namespace in the current context",
+			raw:     "/payments",
+			wantCtx: arn2,
+			wantNS:  "payments",
+		},
+		{
+			name:        "typo in an ARN suggests the real one",
+			raw:         "arn:aws:eks:us-east-1:111122223333:cluster/dev-mian",
+			wantErr:     true,
+			errContains: []string{"did you mean", arn1},
+		},
+		{
+			name:    "blank value is rejected",
+			raw:     "   ",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			env, err := ResolveEnvironment(kc, tt.raw)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got %+v", env)
+				}
+				for _, sub := range tt.errContains {
+					if !strings.Contains(err.Error(), sub) {
+						t.Errorf("error %q should contain %q", err.Error(), sub)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if env.Context != tt.wantCtx {
+				t.Errorf("Context = %q, want %q", env.Context, tt.wantCtx)
+			}
+			if env.Namespace != tt.wantNS {
+				t.Errorf("Namespace = %q, want %q", env.Namespace, tt.wantNS)
+			}
+		})
+	}
+}
+
 func TestResolveContext(t *testing.T) {
 	available := []string{"eks-staging", "eks-prod", "gke-dev"}
 

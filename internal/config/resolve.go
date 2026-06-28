@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/fevzisahinler/kxdiff/internal/model"
 )
 
 // maxSuggestionDistance is the largest edit distance for which a mistyped
@@ -15,9 +17,81 @@ import (
 const maxSuggestionDistance = 3
 
 var (
-	errNoContexts = errors.New("no contexts found in kubeconfig")
-	errNoCurrent  = errors.New("no current context is set; pass a context explicitly")
+	errNoContexts       = errors.New("no contexts found in kubeconfig")
+	errNoCurrent        = errors.New("no current context is set; pass a context explicitly")
+	errEmptyEnvironment = errors.New("environment must not be empty")
 )
+
+// ResolveEnvironment turns a raw --from/--to value into a fully-resolved
+// Environment. Context names are matched against the kubeconfig first, so names
+// that themselves contain slashes (e.g. EKS ARNs) are handled correctly.
+//
+// Resolution order (surrounding whitespace is ignored):
+//
+//	"/ns"         -> namespace "ns" in the current context
+//	"<ctx>"       -> context "<ctx>", all namespaces (whole value is a context)
+//	"<ctx>/<ns>"  -> namespace "ns" in context "<ctx>" (longest context match)
+//	"<ns>"        -> namespace "ns" in the current context (bare token)
+//	otherwise     -> error, suggesting the closest context
+func ResolveEnvironment(kc Kubeconfig, raw string) (model.Environment, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return model.Environment{}, errEmptyEnvironment
+	}
+
+	// Explicit namespace in the current context.
+	if rest, ok := strings.CutPrefix(s, "/"); ok {
+		return inCurrentContext(kc, rest)
+	}
+
+	// The whole value is a known context (handles ARN names with slashes).
+	if contains(kc.Contexts, s) {
+		return model.Environment{Context: s}, nil
+	}
+
+	// A known context followed by "/<namespace>" (longest match wins).
+	if ctx, ns, ok := splitByKnownContext(s, kc.Contexts); ok {
+		return model.Environment{Context: ctx, Namespace: ns}, nil
+	}
+
+	// No context matched and there is no separator: a bare namespace.
+	if !strings.Contains(s, "/") {
+		return inCurrentContext(kc, s)
+	}
+
+	// Looks like "<context>/..." but no context matched: unknown context.
+	if suggestion, ok := closestMatch(s, kc.Contexts); ok {
+		return model.Environment{}, fmt.Errorf("no context matches %q; did you mean %q", s, suggestion)
+	}
+	return model.Environment{}, fmt.Errorf("no context matches %q; available contexts: %s",
+		s, strings.Join(sortedCopy(kc.Contexts), ", "))
+}
+
+// inCurrentContext builds an Environment for namespace ns in the kubeconfig's
+// current context, validating that a current context actually exists.
+func inCurrentContext(kc Kubeconfig, ns string) (model.Environment, error) {
+	ctx, err := ResolveContext(kc.Contexts, kc.CurrentContext, "")
+	if err != nil {
+		return model.Environment{}, err
+	}
+	return model.Environment{Context: ctx, Namespace: ns}, nil
+}
+
+// splitByKnownContext finds the longest known context c such that s is
+// "c/<namespace>", returning c, the namespace and whether a match was found.
+func splitByKnownContext(s string, contexts []string) (string, string, bool) {
+	best, bestNS := "", ""
+	for _, c := range contexts {
+		rest, ok := strings.CutPrefix(s, c+"/")
+		if ok && len(c) > len(best) {
+			best, bestNS = c, rest
+		}
+	}
+	if best == "" {
+		return "", "", false
+	}
+	return best, bestNS, true
+}
 
 // ResolveContext picks the kube context to use.
 //

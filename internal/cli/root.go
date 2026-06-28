@@ -1,7 +1,7 @@
 // Package cli wires up the kxdiff command-line interface (cobra).
 //
-// At this stage it defines the root command and parses its --from/--to flags
-// into environments; the diff engine itself is not implemented yet.
+// At this stage it parses the --from/--to flags and resolves their contexts
+// against the user's kubeconfig; the diff engine itself is not implemented yet.
 package cli
 
 import (
@@ -10,7 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/fevzisahinler/kxdiff/internal/model"
+	"github.com/fevzisahinler/kxdiff/internal/config"
 )
 
 // BuildInfo carries link-time build metadata into the CLI for --version.
@@ -24,8 +24,9 @@ type BuildInfo struct {
 // no globals) so it can be exercised directly in tests.
 func NewRootCmd(info BuildInfo) *cobra.Command {
 	var (
-		from string
-		to   string
+		from       string
+		to         string
+		kubeconfig string
 	)
 
 	cmd := &cobra.Command{
@@ -40,7 +41,11 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: false,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runDiff(cmd.OutOrStdout(), from, to)
+			kc, err := config.LoadKubeconfig(kubeconfig)
+			if err != nil {
+				return err
+			}
+			return runDiff(cmd.OutOrStdout(), kc, from, to)
 		},
 	}
 
@@ -51,22 +56,25 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 
 	cmd.Flags().StringVar(&from, "from", "", "source environment: [context][/namespace]")
 	cmd.Flags().StringVar(&to, "to", "", "target environment: [context][/namespace]")
+	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "",
+		"path to the kubeconfig file (overrides KUBECONFIG and the default)")
 	_ = cmd.MarkFlagRequired("from")
 	_ = cmd.MarkFlagRequired("to")
 
 	return cmd
 }
 
-// runDiff parses the --from/--to environments and reports them. The actual
-// diff is not implemented yet; for now it confirms the inputs were understood.
-func runDiff(out io.Writer, from, to string) error {
-	fromEnv, err := model.ParseEnvironment(from)
+// runDiff resolves the --from/--to environments against the kubeconfig and
+// reports them. The actual diff is not implemented yet; for now it confirms the
+// inputs were understood and the contexts exist.
+func runDiff(out io.Writer, kc config.Kubeconfig, from, to string) error {
+	fromEnv, err := config.ResolveEnvironment(kc, from)
 	if err != nil {
-		return fmt.Errorf("invalid --from: %w", err)
+		return fmt.Errorf("--from: %w", err)
 	}
-	toEnv, err := model.ParseEnvironment(to)
+	toEnv, err := config.ResolveEnvironment(kc, to)
 	if err != nil {
-		return fmt.Errorf("invalid --to: %w", err)
+		return fmt.Errorf("--to: %w", err)
 	}
 
 	_, err = fmt.Fprintf(out,
