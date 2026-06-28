@@ -14,10 +14,12 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/fevzisahinler/kxdiff/internal/config"
+	"github.com/fevzisahinler/kxdiff/internal/diff"
 	"github.com/fevzisahinler/kxdiff/internal/discovery"
 	"github.com/fevzisahinler/kxdiff/internal/fetch"
 	"github.com/fevzisahinler/kxdiff/internal/match"
 	"github.com/fevzisahinler/kxdiff/internal/model"
+	"github.com/fevzisahinler/kxdiff/internal/normalize"
 )
 
 // BuildInfo carries link-time build metadata into the CLI for --version.
@@ -35,6 +37,7 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 		to               string
 		kubeconfig       string
 		includeGenerated bool
+		revealSecrets    bool
 	)
 
 	cmd := &cobra.Command{
@@ -56,8 +59,9 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			opts := fetch.Options{IncludeGenerated: includeGenerated}
-			return runDiff(cmd.Context(), cmd.OutOrStdout(), kubeconfig, fromEnv, toEnv, opts)
+			fetchOpts := fetch.Options{IncludeGenerated: includeGenerated}
+			normOpts := normalize.Options{DropNamespace: true, RevealSecrets: revealSecrets}
+			return runDiff(cmd.Context(), cmd.OutOrStdout(), kubeconfig, fromEnv, toEnv, fetchOpts, normOpts)
 		},
 	}
 
@@ -72,6 +76,8 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 		"path to the kubeconfig file (overrides KUBECONFIG and the default)")
 	cmd.Flags().BoolVar(&includeGenerated, "include-generated", false,
 		"include controller-managed and system objects (pods, replicasets, events, owned objects, ...)")
+	cmd.Flags().BoolVar(&revealSecrets, "reveal-secrets", false,
+		"show raw Secret values instead of hashing them (use with care)")
 	_ = cmd.MarkFlagRequired("from")
 	_ = cmd.MarkFlagRequired("to")
 
@@ -92,15 +98,14 @@ func resolveBoth(kc config.Kubeconfig, from, to string) (model.Environment, mode
 	return fromEnv, toEnv, nil
 }
 
-// runDiff fetches both environments, matches their objects and reports which
-// resources are only on one side and which are in both. Content-level diffing
-// of the "in both" pairs is the next step.
-func runDiff(ctx context.Context, out io.Writer, kubeconfigPath string, from, to model.Environment, opts fetch.Options) error {
-	fromRes, err := fetchEnvironment(ctx, kubeconfigPath, from, opts)
+// runDiff fetches both environments, matches their objects, diffs the content of
+// matched pairs and reports the result.
+func runDiff(ctx context.Context, out io.Writer, kubeconfigPath string, from, to model.Environment, fetchOpts fetch.Options, normOpts normalize.Options) error {
+	fromRes, err := fetchEnvironment(ctx, kubeconfigPath, from, fetchOpts)
 	if err != nil {
 		return fmt.Errorf("from: %w", err)
 	}
-	toRes, err := fetchEnvironment(ctx, kubeconfigPath, to, opts)
+	toRes, err := fetchEnvironment(ctx, kubeconfigPath, to, fetchOpts)
 	if err != nil {
 		return fmt.Errorf("to: %w", err)
 	}
@@ -108,9 +113,32 @@ func runDiff(ctx context.Context, out io.Writer, kubeconfigPath string, from, to
 	// Namespace is part of identity only when both sides span all namespaces;
 	// otherwise namespace<->namespace comparisons must line up by name alone.
 	includeNamespace := from.Namespace == "" && to.Namespace == ""
-	result := match.Match(fromRes.Objects, toRes.Objects, includeNamespace)
+	m := match.Match(fromRes.Objects, toRes.Objects, includeNamespace)
 
-	return printMatch(out, from, to, fromRes, toRes, result)
+	differing, same := diffPairs(m.Both, normOpts)
+	return printReport(out, from, to, fromRes, toRes, m, differing, same)
+}
+
+// resourceChange is a matched resource whose content differs.
+type resourceChange struct {
+	ref    string
+	fields []model.FieldDiff
+}
+
+// diffPairs normalizes and diffs each matched pair, returning the ones that
+// differ and a count of those that are identical after normalization.
+func diffPairs(pairs []match.Pair, opts normalize.Options) ([]resourceChange, int) {
+	var differing []resourceChange
+	same := 0
+	for _, p := range pairs {
+		fields := diff.Objects(normalize.Normalize(p.From, opts), normalize.Normalize(p.To, opts))
+		if len(fields) == 0 {
+			same++
+			continue
+		}
+		differing = append(differing, resourceChange{ref: ref(p.From), fields: fields})
+	}
+	return differing, same
 }
 
 // fetchEnvironment connects to one environment, discovers its resource types and
@@ -139,15 +167,15 @@ func fetchEnvironment(ctx context.Context, kubeconfigPath string, env model.Envi
 	return res, nil
 }
 
-// printMatch renders the match result: a summary header, any warnings, then the
-// three buckets (only-from, only-to, in-both).
-func printMatch(out io.Writer, from, to model.Environment, fromRes, toRes fetch.Result, m match.Result) error {
+// printReport renders the full diff: a summary header, any warnings, the
+// only-from / only-to buckets, and the field-level differences of changed pairs.
+func printReport(out io.Writer, from, to model.Environment, fromRes, toRes fetch.Result, m match.Result, differing []resourceChange, same int) error {
 	lw := &lineWriter{w: out}
 	fromLabel, toLabel := envLabel(from), envLabel(to)
 
 	lw.printf("ENVIRONMENTS: %s  <->  %s\n", fromLabel, toLabel)
-	lw.printf("only in %s: %d | only in %s: %d | in both: %d\n",
-		fromLabel, len(m.OnlyFrom), toLabel, len(m.OnlyTo), len(m.Both))
+	lw.printf("only in %s: %d | only in %s: %d | differs: %d | same: %d\n",
+		fromLabel, len(m.OnlyFrom), toLabel, len(m.OnlyTo), len(differing), same)
 
 	for _, w := range fromRes.Warnings {
 		lw.printf("  warning (%s): %s\n", fromLabel, w)
@@ -158,7 +186,17 @@ func printMatch(out io.Writer, from, to model.Environment, fromRes, toRes fetch.
 
 	printBucket(lw, "only in "+fromLabel, refs(m.OnlyFrom))
 	printBucket(lw, "only in "+toLabel, refs(m.OnlyTo))
-	printBucket(lw, "in both (content diff coming next)", pairRefs(m.Both))
+
+	lw.printf("\ndiffers:\n")
+	if len(differing) == 0 {
+		lw.printf("  (none)\n")
+	}
+	for _, c := range differing {
+		lw.printf("  %s\n", c.ref)
+		for _, f := range c.fields {
+			lw.printf("      %s  %s → %s\n", f.Path, f.From, f.To)
+		}
+	}
 	return lw.err
 }
 
@@ -173,18 +211,14 @@ func printBucket(lw *lineWriter, title string, items []string) {
 	}
 }
 
+func ref(o *unstructured.Unstructured) string {
+	return o.GetKind() + "/" + o.GetName()
+}
+
 func refs(objs []*unstructured.Unstructured) []string {
 	out := make([]string, 0, len(objs))
 	for _, o := range objs {
-		out = append(out, o.GetKind()+"/"+o.GetName())
-	}
-	return out
-}
-
-func pairRefs(pairs []match.Pair) []string {
-	out := make([]string, 0, len(pairs))
-	for _, p := range pairs {
-		out = append(out, p.From.GetKind()+"/"+p.From.GetName())
+		out = append(out, ref(o))
 	}
 	return out
 }
