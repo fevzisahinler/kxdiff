@@ -1,7 +1,8 @@
 // Package cli wires up the kxdiff command-line interface (cobra).
 //
-// At this stage it parses the --from/--to flags and resolves their contexts
-// against the user's kubeconfig; the diff engine itself is not implemented yet.
+// At this stage it resolves the --from/--to flags against the kubeconfig and
+// connects to each cluster to discover its resource types; the diff engine
+// itself is not implemented yet.
 package cli
 
 import (
@@ -11,6 +12,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/fevzisahinler/kxdiff/internal/config"
+	"github.com/fevzisahinler/kxdiff/internal/discovery"
+	"github.com/fevzisahinler/kxdiff/internal/model"
 )
 
 // BuildInfo carries link-time build metadata into the CLI for --version.
@@ -36,8 +39,7 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 			"and reports what differs.\n\n" +
 			"It is strictly read-only: only get/list verbs are used, nothing is " +
 			"ever created, changed or deleted.",
-		Version: info.Version,
-		// Print errors ourselves cleanly; don't dump usage on a runtime error.
+		Version:       info.Version,
 		SilenceUsage:  true,
 		SilenceErrors: false,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -45,7 +47,11 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runDiff(cmd.OutOrStdout(), kc, from, to)
+			fromEnv, toEnv, err := resolveBoth(kc, from, to)
+			if err != nil {
+				return err
+			}
+			return runDiff(cmd.OutOrStdout(), kubeconfig, fromEnv, toEnv)
 		},
 	}
 
@@ -64,23 +70,67 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 	return cmd
 }
 
-// runDiff resolves the --from/--to environments against the kubeconfig and
-// reports them. The actual diff is not implemented yet; for now it confirms the
-// inputs were understood and the contexts exist.
-func runDiff(out io.Writer, kc config.Kubeconfig, from, to string) error {
+// resolveBoth resolves the --from and --to values against the kubeconfig,
+// attributing any error to the right flag.
+func resolveBoth(kc config.Kubeconfig, from, to string) (model.Environment, model.Environment, error) {
 	fromEnv, err := config.ResolveEnvironment(kc, from)
 	if err != nil {
-		return fmt.Errorf("--from: %w", err)
+		return model.Environment{}, model.Environment{}, fmt.Errorf("--from: %w", err)
 	}
 	toEnv, err := config.ResolveEnvironment(kc, to)
 	if err != nil {
-		return fmt.Errorf("--to: %w", err)
+		return model.Environment{}, model.Environment{}, fmt.Errorf("--to: %w", err)
+	}
+	return fromEnv, toEnv, nil
+}
+
+// runDiff connects to both environments and reports the resource types each
+// cluster exposes. The diff engine itself is not implemented yet.
+func runDiff(out io.Writer, kubeconfigPath string, from, to model.Environment) error {
+	if err := reportEnvironment(out, kubeconfigPath, "from", from); err != nil {
+		return err
+	}
+	return reportEnvironment(out, kubeconfigPath, "to", to)
+}
+
+// reportEnvironment connects to one environment's context, discovers its
+// resource types and prints a short summary. Connection and authentication
+// failures are reported clearly, naming the context that could not be reached.
+func reportEnvironment(out io.Writer, kubeconfigPath, label string, env model.Environment) error {
+	lw := &lineWriter{w: out}
+	lw.printf("%s: context=%q namespace=%q\n", label, env.Context, env.Namespace)
+
+	rc, err := config.RestConfig(kubeconfigPath, env.Context)
+	if err != nil {
+		return fmt.Errorf("%s: %w", label, err)
 	}
 
-	_, err = fmt.Fprintf(out,
-		"from: context=%q namespace=%q\nto:   context=%q namespace=%q\n",
-		fromEnv.Context, fromEnv.Namespace, toEnv.Context, toEnv.Namespace)
-	return err
+	result, err := discovery.ListResourceTypes(rc)
+	if err != nil {
+		return fmt.Errorf("%s: cannot reach context %q: %w", label, env.Context, err)
+	}
+
+	for _, w := range result.Warnings {
+		lw.printf("  warning: %s\n", w)
+	}
+	lw.printf("  discovered %d resource types\n", len(result.Types))
+	for _, rt := range result.Types {
+		lw.printf("    - %s\n", rt)
+	}
+	return lw.err
+}
+
+// lineWriter writes formatted lines to w, remembering the first write error so
+// callers can check it once at the end.
+type lineWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (lw *lineWriter) printf(format string, args ...any) {
+	if lw.err == nil {
+		_, lw.err = fmt.Fprintf(lw.w, format, args...)
+	}
 }
 
 // Execute builds and runs the root command. It is the single entry point used
