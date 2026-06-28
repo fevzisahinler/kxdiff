@@ -32,6 +32,11 @@ func (rt ResourceType) GroupVersion() string {
 	return rt.Group + "/" + rt.Version
 }
 
+// GroupVersionResource returns the GVR used to query the dynamic client.
+func (rt ResourceType) GroupVersionResource() schema.GroupVersionResource {
+	return schema.GroupVersionResource{Group: rt.Group, Version: rt.Version, Resource: rt.Resource}
+}
+
 // String renders the type for display, e.g. "deployments (apps/v1, namespaced)".
 func (rt ResourceType) String() string {
 	scope := "cluster"
