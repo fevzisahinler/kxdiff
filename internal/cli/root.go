@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/fevzisahinler/kxdiff/internal/config"
 	"github.com/fevzisahinler/kxdiff/internal/discovery"
+	"github.com/fevzisahinler/kxdiff/internal/fetch"
 	"github.com/fevzisahinler/kxdiff/internal/model"
 )
 
@@ -27,9 +29,10 @@ type BuildInfo struct {
 // no globals) so it can be exercised directly in tests.
 func NewRootCmd(info BuildInfo) *cobra.Command {
 	var (
-		from       string
-		to         string
-		kubeconfig string
+		from             string
+		to               string
+		kubeconfig       string
+		includeGenerated bool
 	)
 
 	cmd := &cobra.Command{
@@ -51,7 +54,8 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runDiff(cmd.OutOrStdout(), kubeconfig, fromEnv, toEnv)
+			opts := fetch.Options{IncludeGenerated: includeGenerated}
+			return runDiff(cmd.Context(), cmd.OutOrStdout(), kubeconfig, fromEnv, toEnv, opts)
 		},
 	}
 
@@ -64,6 +68,8 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 	cmd.Flags().StringVar(&to, "to", "", "target environment: [context][/namespace]")
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "",
 		"path to the kubeconfig file (overrides KUBECONFIG and the default)")
+	cmd.Flags().BoolVar(&includeGenerated, "include-generated", false,
+		"include controller-managed and system objects (pods, replicasets, events, owned objects, ...)")
 	_ = cmd.MarkFlagRequired("from")
 	_ = cmd.MarkFlagRequired("to")
 
@@ -84,19 +90,20 @@ func resolveBoth(kc config.Kubeconfig, from, to string) (model.Environment, mode
 	return fromEnv, toEnv, nil
 }
 
-// runDiff connects to both environments and reports the resource types each
-// cluster exposes. The diff engine itself is not implemented yet.
-func runDiff(out io.Writer, kubeconfigPath string, from, to model.Environment) error {
-	if err := reportEnvironment(out, kubeconfigPath, "from", from); err != nil {
+// runDiff connects to both environments and reports the objects each one holds.
+// The diff engine itself is not implemented yet.
+func runDiff(ctx context.Context, out io.Writer, kubeconfigPath string, from, to model.Environment, opts fetch.Options) error {
+	if err := reportEnvironment(ctx, out, kubeconfigPath, "from", from, opts); err != nil {
 		return err
 	}
-	return reportEnvironment(out, kubeconfigPath, "to", to)
+	return reportEnvironment(ctx, out, kubeconfigPath, "to", to, opts)
 }
 
 // reportEnvironment connects to one environment's context, discovers its
-// resource types and prints a short summary. Connection and authentication
-// failures are reported clearly, naming the context that could not be reached.
-func reportEnvironment(out io.Writer, kubeconfigPath, label string, env model.Environment) error {
+// resource types, fetches the live objects and prints a short summary.
+// Connection and authentication failures are reported clearly, naming the
+// context that could not be reached.
+func reportEnvironment(ctx context.Context, out io.Writer, kubeconfigPath, label string, env model.Environment, opts fetch.Options) error {
 	lw := &lineWriter{w: out}
 	lw.printf("%s: context=%q namespace=%q\n", label, env.Context, env.Namespace)
 
@@ -105,17 +112,30 @@ func reportEnvironment(out io.Writer, kubeconfigPath, label string, env model.En
 		return fmt.Errorf("%s: %w", label, err)
 	}
 
-	result, err := discovery.ListResourceTypes(rc)
+	disco, err := discovery.ListResourceTypes(rc)
 	if err != nil {
 		return fmt.Errorf("%s: cannot reach context %q: %w", label, env.Context, err)
 	}
 
+	lister, err := fetch.NewListerForConfig(rc)
+	if err != nil {
+		return fmt.Errorf("%s: %w", label, err)
+	}
+
+	result, err := fetch.Fetch(ctx, lister, env, disco.Types, opts)
+	if err != nil {
+		return fmt.Errorf("%s: %w", label, err)
+	}
+
+	for _, w := range disco.Warnings {
+		lw.printf("  warning: %s\n", w)
+	}
 	for _, w := range result.Warnings {
 		lw.printf("  warning: %s\n", w)
 	}
-	lw.printf("  discovered %d resource types\n", len(result.Types))
-	for _, rt := range result.Types {
-		lw.printf("    - %s\n", rt)
+	lw.printf("  fetched %d objects\n", len(result.Objects))
+	for _, o := range result.Objects {
+		lw.printf("    - %s/%s\n", o.GetKind(), o.GetName())
 	}
 	return lw.err
 }
