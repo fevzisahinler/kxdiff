@@ -26,16 +26,35 @@ import (
 // hammered (and we don't get throttled).
 const maxConcurrentLists = 12
 
-// generatedResources are controller-managed, high-churn types that are noise in
-// a diff. They are skipped by default (use Options.IncludeGenerated to keep
-// them). Skipping "events" by resource name also drops the duplicate that the
-// core and events.k8s.io groups would otherwise both return.
+// systemNamespaces are excluded by default in whole-context mode; -A includes
+// them.
+var systemNamespaces = map[string]bool{
+	"kube-system":        true,
+	"kube-node-lease":    true,
+	"kube-public":        true,
+	"local-path-storage": true,
+}
+
+func isSystemNamespace(ns string) bool { return systemNamespaces[ns] }
+
+// generatedResources are noise types skipped by default (use
+// Options.IncludeGenerated to keep them): controller-managed / high-churn types,
+// plus cluster-infrastructure types whose values are inherently per-cluster
+// (node names, server-assigned IPs). Skipping "events" by resource name also
+// drops the duplicate that the core and events.k8s.io groups both return.
 var generatedResources = map[string]bool{
+	// controller-managed / high churn
 	"events":         true,
 	"pods":           true,
 	"replicasets":    true,
 	"endpoints":      true,
 	"endpointslices": true,
+	"leases":         true,
+	// cluster infrastructure (per-cluster, not config drift)
+	"nodes":             true,
+	"csinodes":          true,
+	"componentstatuses": true,
+	"ipaddresses":       true,
 }
 
 // Options tunes what Fetch pulls.
@@ -48,6 +67,9 @@ type Options struct {
 	// only matching types are fetched and the noise filter is bypassed for them
 	// (an explicit request wins over the default filtering).
 	Selectors []discovery.Selector
+	// IncludeSystemNamespaces keeps objects in system namespaces (kube-system,
+	// ...) when comparing whole contexts. They are excluded by default.
+	IncludeSystemNamespaces bool
 }
 
 // Lister is the read-only slice of the dynamic client that fetch needs.
@@ -78,7 +100,7 @@ func Fetch(ctx context.Context, lister Lister, env model.Environment, types []di
 	}
 	selected := selectTypes(types, env.Namespace != "", opts)
 
-	g, ctx := errgroup.WithContext(ctx)
+	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(maxConcurrentLists)
 
 	var (
@@ -94,7 +116,7 @@ func Fetch(ctx context.Context, lister Lister, env model.Environment, types []di
 				ns = env.Namespace
 			}
 
-			list, err := lister.List(ctx, rt.GroupVersionResource(), ns)
+			list, err := lister.List(gctx, rt.GroupVersionResource(), ns)
 			if err != nil {
 				if isSkippable(err) {
 					mu.Lock()
@@ -108,6 +130,9 @@ func Fetch(ctx context.Context, lister Lister, env model.Environment, types []di
 			mu.Lock()
 			for i := range list.Items {
 				item := &list.Items[i]
+				if env.Namespace == "" && !opts.IncludeSystemNamespaces && isSystemNamespace(item.GetNamespace()) {
+					continue
+				}
 				if keep(item, rt, opts) {
 					objects = append(objects, item)
 				}
@@ -121,9 +146,40 @@ func Fetch(ctx context.Context, lister Lister, env model.Environment, types []di
 		return Result{}, err
 	}
 
+	// In namespace<->namespace mode, also compare the Namespace object itself so
+	// its labels/annotations (e.g. Pod Security Standards) are diffed.
+	if env.Namespace != "" {
+		nsObj, err := namespaceObject(ctx, lister, env.Namespace)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("could not read namespace %q: %v", env.Namespace, err))
+		} else if nsObj != nil {
+			objects = append(objects, nsObj)
+		}
+	}
+
 	sortObjects(objects)
 	sort.Strings(warnings)
 	return Result{Objects: objects, Warnings: warnings}, nil
+}
+
+var namespaceGVR = schema.GroupVersionResource{Version: "v1", Resource: "namespaces"}
+
+// namespaceObject fetches the Namespace object named name, or nil if it cannot
+// be found or listed.
+func namespaceObject(ctx context.Context, lister Lister, name string) (*unstructured.Unstructured, error) {
+	list, err := lister.List(ctx, namespaceGVR, "")
+	if err != nil {
+		if isSkippable(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	for i := range list.Items {
+		if list.Items[i].GetName() == name {
+			return &list.Items[i], nil
+		}
+	}
+	return nil, nil
 }
 
 // selectTypes chooses which resource types to fetch: only namespaced types when

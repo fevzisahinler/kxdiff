@@ -45,6 +45,7 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 		includeGenerated bool
 		revealSecrets    bool
 		noColor          bool
+		allNamespaces    bool
 		quiet            bool
 		onlyFrom         bool
 		onlyTo           bool
@@ -71,8 +72,9 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 				return err
 			}
 			fetchOpts := fetch.Options{
-				IncludeGenerated: includeGenerated,
-				Selectors:        parseSelectors(args),
+				IncludeGenerated:        includeGenerated,
+				Selectors:               parseSelectors(args),
+				IncludeSystemNamespaces: allNamespaces,
 			}
 			normOpts := normalize.Options{DropNamespace: true, RevealSecrets: revealSecrets}
 			p := palette{enabled: useColor(noColor)}
@@ -90,6 +92,8 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 	cmd.Flags().StringVar(&to, "to", "", "target environment: [context][/namespace]")
 	cmd.Flags().StringVar(&kubeconfig, "kubeconfig", "",
 		"path to the kubeconfig file (overrides KUBECONFIG and the default)")
+	cmd.Flags().BoolVarP(&allNamespaces, "all-namespaces", "A", false,
+		"in whole-context mode, also compare system namespaces (kube-system, ...)")
 	cmd.Flags().BoolVar(&includeGenerated, "include-generated", false,
 		"include controller-managed and system objects (pods, replicasets, events, owned objects, ...)")
 	cmd.Flags().BoolVar(&revealSecrets, "reveal-secrets", false,

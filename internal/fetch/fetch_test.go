@@ -19,7 +19,10 @@ type fakeLister struct {
 	errs  map[schema.GroupVersionResource]error
 }
 
-func (f fakeLister) List(_ context.Context, gvr schema.GroupVersionResource, _ string) (*unstructured.UnstructuredList, error) {
+func (f fakeLister) List(ctx context.Context, gvr schema.GroupVersionResource, _ string) (*unstructured.UnstructuredList, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err // catches use of a cancelled context
+	}
 	if err := f.errs[gvr]; err != nil {
 		return nil, err
 	}
@@ -98,21 +101,22 @@ func TestFetch_FatalErrorPropagates(t *testing.T) {
 }
 
 func TestFetch_AllNamespacesIncludesClusterScoped(t *testing.T) {
+	crGVR := gvr("rbac.authorization.k8s.io", "v1", "clusterroles")
 	lister := fakeLister{
 		lists: map[schema.GroupVersionResource]*unstructured.UnstructuredList{
-			gvr("", "v1", "nodes"): {Items: []unstructured.Unstructured{obj("v1", "Node", "", "node-1")}},
+			crGVR: {Items: []unstructured.Unstructured{obj("rbac.authorization.k8s.io/v1", "ClusterRole", "", "admin")}},
 		},
 	}
 	types := []discovery.ResourceType{
-		{Version: "v1", Resource: "nodes", Kind: "Node", Namespaced: false},
+		{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterroles", Kind: "ClusterRole", Namespaced: false},
 	}
 
 	res, err := Fetch(context.Background(), lister, model.Environment{Context: "kind-dev"}, types, Options{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(res.Objects) != 1 || res.Objects[0].GetKind() != "Node" {
-		t.Errorf("expected the cluster-scoped Node, got %v", kinds(res.Objects))
+	if len(res.Objects) != 1 || res.Objects[0].GetKind() != "ClusterRole" {
+		t.Errorf("expected the cluster-scoped ClusterRole, got %v", kinds(res.Objects))
 	}
 }
 
@@ -205,6 +209,71 @@ func TestFetch_NameSelector(t *testing.T) {
 	}
 	if got := kinds(res.Objects); len(got) != 1 || got[0] != "ConfigMap/app" {
 		t.Errorf("name selector: got %v, want [ConfigMap/app]", got)
+	}
+}
+
+func TestFetch_FiltersSystemNamespacesInWholeContext(t *testing.T) {
+	lister := fakeLister{
+		lists: map[schema.GroupVersionResource]*unstructured.UnstructuredList{
+			gvr("", "v1", "configmaps"): {Items: []unstructured.Unstructured{
+				obj("v1", "ConfigMap", "demo", "app"),
+				obj("v1", "ConfigMap", "kube-system", "coredns"),
+			}},
+		},
+	}
+	types := []discovery.ResourceType{
+		{Version: "v1", Resource: "configmaps", Kind: "ConfigMap", Namespaced: true},
+	}
+	env := model.Environment{Context: "c"} // whole context: namespace empty
+
+	res, err := Fetch(context.Background(), lister, env, types, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := kinds(res.Objects); len(got) != 1 || got[0] != "ConfigMap/app" {
+		t.Errorf("system namespace should be filtered by default, got %v", got)
+	}
+
+	resAll, err := Fetch(context.Background(), lister, env, types, Options{IncludeSystemNamespaces: true})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(resAll.Objects) != 2 {
+		t.Errorf("with IncludeSystemNamespaces expected 2 objects, got %v", kinds(resAll.Objects))
+	}
+}
+
+func TestFetch_IncludesNamespaceObjectInNamespaceMode(t *testing.T) {
+	lister := fakeLister{
+		lists: map[schema.GroupVersionResource]*unstructured.UnstructuredList{
+			gvr("", "v1", "configmaps"): {Items: []unstructured.Unstructured{obj("v1", "ConfigMap", "demo", "app")}},
+			gvr("", "v1", "namespaces"): {Items: []unstructured.Unstructured{
+				obj("v1", "Namespace", "", "demo"),
+				obj("v1", "Namespace", "", "other"),
+			}},
+		},
+	}
+	types := []discovery.ResourceType{
+		{Version: "v1", Resource: "configmaps", Kind: "ConfigMap", Namespaced: true},
+		{Version: "v1", Resource: "namespaces", Kind: "Namespace", Namespaced: false},
+	}
+
+	res, err := Fetch(context.Background(), lister, model.Environment{Namespace: "demo"}, types, Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var nsCount int
+	for _, o := range res.Objects {
+		if o.GetKind() == "Namespace" {
+			nsCount++
+			if o.GetName() != "demo" {
+				t.Errorf("wrong namespace object included: %s", o.GetName())
+			}
+		}
+	}
+	if nsCount != 1 {
+		t.Errorf("expected exactly the demo Namespace object, got %d", nsCount)
 	}
 }
 
