@@ -70,6 +70,36 @@ func TestObjects_AddedAndRemoved(t *testing.T) {
 	}
 }
 
+func TestObjects_IndexedMapListAndReadableScalars(t *testing.T) {
+	mk := func(resources, verbs []any) *unstructured.Unstructured {
+		return u(map[string]any{
+			"rules": []any{
+				map[string]any{
+					"apiGroups": []any{""},
+					"resources": resources,
+					"verbs":     verbs,
+				},
+			},
+		})
+	}
+	from := mk([]any{"configmaps"}, []any{"get", "list"})
+	to := mk([]any{"configmaps", "secrets"}, []any{"get", "list", "watch"})
+
+	diffs := Objects(from, to)
+	if len(diffs) != 2 {
+		t.Fatalf("expected 2 diffs, got %+v", diffs)
+	}
+	if diffs[0].Path != "rules[0].resources" {
+		t.Errorf("path = %q, want rules[0].resources", diffs[0].Path)
+	}
+	if diffs[0].From != "[configmaps]" || diffs[0].To != "[configmaps, secrets]" {
+		t.Errorf("readable scalar list expected, got %+v", diffs[0])
+	}
+	if diffs[1].Path != "rules[0].verbs" {
+		t.Errorf("path = %q, want rules[0].verbs", diffs[1].Path)
+	}
+}
+
 func TestObjects_Identical(t *testing.T) {
 	o := u(map[string]any{"spec": map[string]any{"replicas": int64(3)}})
 	if d := Objects(o, o); len(d) != 0 {

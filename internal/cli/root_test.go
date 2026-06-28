@@ -119,6 +119,16 @@ func TestViewSections(t *testing.T) {
 	}
 }
 
+func TestLineDiff(t *testing.T) {
+	removed, added := lineDiff("a\nb\nc", "a\nx\nc")
+	if len(removed) != 1 || removed[0] != "b" {
+		t.Errorf("removed = %v, want [b]", removed)
+	}
+	if len(added) != 1 || added[0] != "x" {
+		t.Errorf("added = %v, want [x]", added)
+	}
+}
+
 func TestPalette(t *testing.T) {
 	on := palette{enabled: true}
 	if got := on.red("x"); got != "\x1b[31mx\x1b[0m" {

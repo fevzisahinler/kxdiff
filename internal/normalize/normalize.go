@@ -48,10 +48,33 @@ func Normalize(obj *unstructured.Unstructured, opts Options) *unstructured.Unstr
 		unstructured.RemoveNestedField(out.Object, "metadata", "namespace")
 	}
 
+	stripRuntimeFields(out)
 	if !opts.RevealSecrets && out.GetKind() == "Secret" {
 		maskSecretData(out)
 	}
 	return out
+}
+
+// stripRuntimeFields removes spec fields the API server assigns at runtime,
+// which differ between clusters but are not meaningful to diff (currently the
+// Service cluster IPs and node ports).
+func stripRuntimeFields(o *unstructured.Unstructured) {
+	if o.GetKind() != "Service" {
+		return
+	}
+	unstructured.RemoveNestedField(o.Object, "spec", "clusterIP")
+	unstructured.RemoveNestedField(o.Object, "spec", "clusterIPs")
+
+	ports, found, err := unstructured.NestedSlice(o.Object, "spec", "ports")
+	if err != nil || !found {
+		return
+	}
+	for _, p := range ports {
+		if m, ok := p.(map[string]any); ok {
+			delete(m, "nodePort")
+		}
+	}
+	_ = unstructured.SetNestedSlice(o.Object, ports, "spec", "ports")
 }
 
 // maskSecretData replaces Secret data/stringData values with short hashes, so

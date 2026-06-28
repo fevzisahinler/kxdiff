@@ -52,6 +52,39 @@ func TestNormalize_StripsNoiseAndKeepsMeaning(t *testing.T) {
 	}
 }
 
+func TestNormalize_StripsServiceRuntimeFields(t *testing.T) {
+	in := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "Service",
+		"metadata":   map[string]any{"name": "api"},
+		"spec": map[string]any{
+			"clusterIP":  "10.96.0.1",
+			"clusterIPs": []any{"10.96.0.1"},
+			"ports": []any{
+				map[string]any{"name": "http", "port": int64(80), "nodePort": int64(30080)},
+			},
+		},
+	}}
+
+	out := Normalize(in, Options{})
+	spec, _, _ := unstructured.NestedMap(out.Object, "spec")
+	if _, ok := spec["clusterIP"]; ok {
+		t.Error("clusterIP should be stripped")
+	}
+	if _, ok := spec["clusterIPs"]; ok {
+		t.Error("clusterIPs should be stripped")
+	}
+
+	ports, _, _ := unstructured.NestedSlice(out.Object, "spec", "ports")
+	port := ports[0].(map[string]any)
+	if _, ok := port["nodePort"]; ok {
+		t.Error("nodePort should be stripped")
+	}
+	if _, ok := port["port"]; !ok {
+		t.Error("port should be kept")
+	}
+}
+
 func TestNormalize_MasksSecretsByDefault(t *testing.T) {
 	const raw = "c3VwZXItc2VjcmV0"
 	in := &unstructured.Unstructured{Object: map[string]interface{}{

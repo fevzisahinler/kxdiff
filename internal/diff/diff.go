@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
@@ -61,26 +62,68 @@ func walkMaps(path string, from, to map[string]any, diffs *[]model.FieldDiff) {
 }
 
 func walkSlices(path string, from, to []any, diffs *[]model.FieldDiff) {
-	if isNamedList(from) && isNamedList(to) {
-		fromByName, toByName := byName(from), byName(to)
-		for _, name := range unionKeys(fromByName, toByName) {
-			fv, fok := fromByName[name]
-			tv, tok := toByName[name]
-			child := fmt.Sprintf("%s[%s]", path, name)
-			switch {
-			case fok && tok:
-				walk(child, fv, tv, diffs)
-			case fok:
-				*diffs = append(*diffs, model.FieldDiff{Path: child, From: render(fv), To: absent})
-			default:
-				*diffs = append(*diffs, model.FieldDiff{Path: child, From: absent, To: render(tv)})
-			}
+	switch {
+	case isNamedList(from) && isNamedList(to):
+		walkNamedSlices(path, from, to, diffs)
+	case isMapList(from) && isMapList(to):
+		walkIndexedSlices(path, from, to, diffs)
+	default:
+		if !reflect.DeepEqual(from, to) {
+			*diffs = append(*diffs, model.FieldDiff{Path: path, From: render(from), To: render(to)})
 		}
-		return
 	}
-	if !reflect.DeepEqual(from, to) {
-		*diffs = append(*diffs, model.FieldDiff{Path: path, From: render(from), To: render(to)})
+}
+
+// walkNamedSlices matches list elements by their "name" field.
+func walkNamedSlices(path string, from, to []any, diffs *[]model.FieldDiff) {
+	fromByName, toByName := byName(from), byName(to)
+	for _, name := range unionKeys(fromByName, toByName) {
+		fv, fok := fromByName[name]
+		tv, tok := toByName[name]
+		child := fmt.Sprintf("%s[%s]", path, name)
+		switch {
+		case fok && tok:
+			walk(child, fv, tv, diffs)
+		case fok:
+			*diffs = append(*diffs, model.FieldDiff{Path: child, From: render(fv), To: absent})
+		default:
+			*diffs = append(*diffs, model.FieldDiff{Path: child, From: absent, To: render(tv)})
+		}
 	}
+}
+
+// walkIndexedSlices matches list-of-maps elements positionally — used for lists
+// whose elements have no "name" (e.g. RBAC rules), so the diff points at the
+// changed field instead of dumping the whole list.
+func walkIndexedSlices(path string, from, to []any, diffs *[]model.FieldDiff) {
+	n := len(from)
+	if len(to) > n {
+		n = len(to)
+	}
+	for i := 0; i < n; i++ {
+		child := fmt.Sprintf("%s[%d]", path, i)
+		switch {
+		case i < len(from) && i < len(to):
+			walk(child, from[i], to[i], diffs)
+		case i < len(from):
+			*diffs = append(*diffs, model.FieldDiff{Path: child, From: render(from[i]), To: absent})
+		default:
+			*diffs = append(*diffs, model.FieldDiff{Path: child, From: absent, To: render(to[i])})
+		}
+	}
+}
+
+// isMapList reports whether every element is a map (a list of objects).
+func isMapList(list []any) bool {
+	if len(list) == 0 {
+		return false
+	}
+	for _, el := range list {
+		if _, ok := el.(map[string]any); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // isNamedList reports whether every element is a map carrying a string "name".
@@ -133,14 +176,36 @@ func joinPath(parent, key string) string {
 }
 
 func render(v any) string {
-	if v == nil {
+	switch t := v.(type) {
+	case nil:
 		return absent
+	case map[string]any:
+		return jsonRender(v)
+	case []any:
+		return renderList(t)
+	default:
+		return fmt.Sprintf("%v", v)
 	}
-	switch v.(type) {
-	case map[string]any, []any:
-		if b, err := json.Marshal(v); err == nil {
-			return string(b)
+}
+
+// renderList renders a list readably: scalars as "[a, b, c]", nested
+// maps/lists as compact JSON.
+func renderList(list []any) string {
+	parts := make([]string, len(list))
+	for i, el := range list {
+		switch el.(type) {
+		case map[string]any, []any:
+			parts[i] = jsonRender(el)
+		default:
+			parts[i] = fmt.Sprintf("%v", el)
 		}
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+func jsonRender(v any) string {
+	if b, err := json.Marshal(v); err == nil {
+		return string(b)
 	}
 	return fmt.Sprintf("%v", v)
 }

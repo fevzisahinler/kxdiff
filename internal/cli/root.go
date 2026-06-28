@@ -274,11 +274,56 @@ func printReport(out io.Writer, p palette, v viewOptions, from, to model.Environ
 		for _, c := range differing {
 			lw.printf("  %s\n", p.yellow(c.ref))
 			for _, f := range c.fields {
-				lw.printf("      %s  %s → %s\n", f.Path, p.red(f.From), p.green(f.To))
+				printField(lw, p, f)
 			}
 		}
 	}
 	return lw.err
+}
+
+// printField prints one field diff. Single-line values are shown inline; a
+// multi-line value (e.g. an embedded config file) is shown as a line block with
+// only the changed lines.
+func printField(lw *lineWriter, p palette, f model.FieldDiff) {
+	if strings.Contains(f.From, "\n") || strings.Contains(f.To, "\n") {
+		lw.printf("      %s:\n", f.Path)
+		removed, added := lineDiff(f.From, f.To)
+		for _, line := range removed {
+			lw.printf("        %s\n", p.red("- "+line))
+		}
+		for _, line := range added {
+			lw.printf("        %s\n", p.green("+ "+line))
+		}
+		return
+	}
+	lw.printf("      %s  %s → %s\n", f.Path, p.red(f.From), p.green(f.To))
+}
+
+// lineDiff returns the lines present only in from (removed) and only in to
+// (added), preserving order; lines common to both are omitted.
+func lineDiff(from, to string) (removed, added []string) {
+	fromLines := strings.Split(from, "\n")
+	toLines := strings.Split(to, "\n")
+	inFrom, inTo := lineSet(fromLines), lineSet(toLines)
+	for _, l := range fromLines {
+		if !inTo[l] {
+			removed = append(removed, l)
+		}
+	}
+	for _, l := range toLines {
+		if !inFrom[l] {
+			added = append(added, l)
+		}
+	}
+	return removed, added
+}
+
+func lineSet(lines []string) map[string]bool {
+	set := make(map[string]bool, len(lines))
+	for _, l := range lines {
+		set[l] = true
+	}
+	return set
 }
 
 func printBucket(lw *lineWriter, p palette, title string, items []string, color func(string) string) {
