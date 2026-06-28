@@ -106,3 +106,17 @@ func TestResolveBoth_ToError(t *testing.T) {
 		t.Errorf("error should mention --to: %v", err)
 	}
 }
+
+func TestPalette(t *testing.T) {
+	on := palette{enabled: true}
+	if got := on.red("x"); got != "\x1b[31mx\x1b[0m" {
+		t.Errorf("enabled red = %q", got)
+	}
+
+	off := palette{enabled: false}
+	for _, got := range []string{off.red("x"), off.green("x"), off.yellow("x"), off.bold("x")} {
+		if got != "x" {
+			t.Errorf("disabled palette should be plain, got %q", got)
+		}
+	}
+}
