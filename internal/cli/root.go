@@ -1,20 +1,17 @@
 // Package cli wires up the kxdiff command-line interface (cobra).
 //
-// At this skeleton stage it defines the root command, its flags and version
-// reporting only; the diff engine is not implemented yet.
+// At this stage it defines the root command and parses its --from/--to flags
+// into environments; the diff engine itself is not implemented yet.
 package cli
 
 import (
-	"errors"
 	"fmt"
+	"io"
 
 	"github.com/spf13/cobra"
-)
 
-// errNotImplemented is returned by the root command until the diff engine
-// is wired up. It keeps the skeleton honest: running the tool fails loudly
-// instead of silently doing nothing.
-var errNotImplemented = errors.New("not implemented yet")
+	"github.com/fevzisahinler/kxdiff/internal/model"
+)
 
 // BuildInfo carries link-time build metadata into the CLI for --version.
 type BuildInfo struct {
@@ -42,8 +39,8 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 		// Print errors ourselves cleanly; don't dump usage on a runtime error.
 		SilenceUsage:  true,
 		SilenceErrors: false,
-		RunE: func(_ *cobra.Command, _ []string) error {
-			return errNotImplemented
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runDiff(cmd.OutOrStdout(), from, to)
 		},
 	}
 
@@ -54,8 +51,28 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 
 	cmd.Flags().StringVar(&from, "from", "", "source environment: [context][/namespace]")
 	cmd.Flags().StringVar(&to, "to", "", "target environment: [context][/namespace]")
+	_ = cmd.MarkFlagRequired("from")
+	_ = cmd.MarkFlagRequired("to")
 
 	return cmd
+}
+
+// runDiff parses the --from/--to environments and reports them. The actual
+// diff is not implemented yet; for now it confirms the inputs were understood.
+func runDiff(out io.Writer, from, to string) error {
+	fromEnv, err := model.ParseEnvironment(from)
+	if err != nil {
+		return fmt.Errorf("invalid --from: %w", err)
+	}
+	toEnv, err := model.ParseEnvironment(to)
+	if err != nil {
+		return fmt.Errorf("invalid --to: %w", err)
+	}
+
+	_, err = fmt.Fprintf(out,
+		"from: context=%q namespace=%q\nto:   context=%q namespace=%q\n",
+		fromEnv.Context, fromEnv.Namespace, toEnv.Context, toEnv.Namespace)
+	return err
 }
 
 // Execute builds and runs the root command. It is the single entry point used
