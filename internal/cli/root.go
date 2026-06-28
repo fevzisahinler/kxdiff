@@ -45,6 +45,10 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 		includeGenerated bool
 		revealSecrets    bool
 		noColor          bool
+		quiet            bool
+		onlyFrom         bool
+		onlyTo           bool
+		onlyDiff         bool
 	)
 
 	cmd := &cobra.Command{
@@ -72,7 +76,8 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 			}
 			normOpts := normalize.Options{DropNamespace: true, RevealSecrets: revealSecrets}
 			p := palette{enabled: useColor(noColor)}
-			return runDiff(cmd.Context(), cmd.OutOrStdout(), p, kubeconfig, fromEnv, toEnv, fetchOpts, normOpts)
+			view := viewOptions{quiet: quiet, onlyFrom: onlyFrom, onlyTo: onlyTo, onlyDiff: onlyDiff}
+			return runDiff(cmd.Context(), cmd.OutOrStdout(), p, view, kubeconfig, fromEnv, toEnv, fetchOpts, normOpts)
 		},
 	}
 
@@ -90,6 +95,11 @@ func NewRootCmd(info BuildInfo) *cobra.Command {
 	cmd.Flags().BoolVar(&revealSecrets, "reveal-secrets", false,
 		"show raw Secret values instead of hashing them (use with care)")
 	cmd.Flags().BoolVar(&noColor, "no-color", false, "disable coloured output")
+	cmd.Flags().BoolVarP(&quiet, "quiet", "q", false,
+		"print nothing; rely on the exit code (0 = no diff, 1 = diff, 2 = error)")
+	cmd.Flags().BoolVar(&onlyFrom, "only-from", false, "show only resources present only in --from")
+	cmd.Flags().BoolVar(&onlyTo, "only-to", false, "show only resources present only in --to")
+	cmd.Flags().BoolVar(&onlyDiff, "only-diff", false, "show only resources that differ")
 	_ = cmd.MarkFlagRequired("from")
 	_ = cmd.MarkFlagRequired("to")
 
@@ -137,7 +147,7 @@ func resolveBoth(kc config.Kubeconfig, from, to string) (model.Environment, mode
 
 // runDiff fetches both environments, matches their objects, diffs matched pairs
 // and prints the report. It returns errDifferencesFound when anything differs.
-func runDiff(ctx context.Context, out io.Writer, p palette, kubeconfigPath string, from, to model.Environment, fetchOpts fetch.Options, normOpts normalize.Options) error {
+func runDiff(ctx context.Context, out io.Writer, p palette, view viewOptions, kubeconfigPath string, from, to model.Environment, fetchOpts fetch.Options, normOpts normalize.Options) error {
 	fromRes, err := fetchEnvironment(ctx, kubeconfigPath, from, fetchOpts)
 	if err != nil {
 		return fmt.Errorf("from: %w", err)
@@ -153,7 +163,7 @@ func runDiff(ctx context.Context, out io.Writer, p palette, kubeconfigPath strin
 	m := match.Match(fromRes.Objects, toRes.Objects, includeNamespace)
 
 	differing, same := diffPairs(m.Both, normOpts)
-	if err := printReport(out, p, from, to, fromRes, toRes, m, differing, same); err != nil {
+	if err := printReport(out, p, view, from, to, fromRes, toRes, m, differing, same); err != nil {
 		return err
 	}
 
@@ -211,9 +221,30 @@ func diffPairs(pairs []match.Pair, opts normalize.Options) ([]resourceChange, in
 	return differing, same
 }
 
-// printReport renders the full diff: a summary header, any warnings, the
-// only-from / only-to buckets, and the field-level differences of changed pairs.
-func printReport(out io.Writer, p palette, from, to model.Environment, fromRes, toRes fetch.Result, m match.Result, differing []resourceChange, same int) error {
+// viewOptions controls how much of the report is printed.
+type viewOptions struct {
+	quiet    bool
+	onlyFrom bool
+	onlyTo   bool
+	onlyDiff bool
+}
+
+// sections reports which output sections to show. With no --only-* flag all are
+// shown; otherwise only the selected ones.
+func (v viewOptions) sections() (from, to, diff bool) {
+	if !v.onlyFrom && !v.onlyTo && !v.onlyDiff {
+		return true, true, true
+	}
+	return v.onlyFrom, v.onlyTo, v.onlyDiff
+}
+
+// printReport renders the diff: a summary header, any warnings, and the
+// requested sections. With --quiet nothing is printed (the exit code carries
+// the result).
+func printReport(out io.Writer, p palette, v viewOptions, from, to model.Environment, fromRes, toRes fetch.Result, m match.Result, differing []resourceChange, same int) error {
+	if v.quiet {
+		return nil
+	}
 	lw := &lineWriter{w: out}
 	fromLabel, toLabel := envLabel(from), envLabel(to)
 
@@ -228,17 +259,23 @@ func printReport(out io.Writer, p palette, from, to model.Environment, fromRes, 
 		lw.printf("  warning (%s): %s\n", toLabel, w)
 	}
 
-	printBucket(lw, p, "only in "+fromLabel, refs(m.OnlyFrom), p.red)
-	printBucket(lw, p, "only in "+toLabel, refs(m.OnlyTo), p.green)
-
-	lw.printf("\n%s\n", p.bold("differs:"))
-	if len(differing) == 0 {
-		lw.printf("  (none)\n")
+	showFrom, showTo, showDiff := v.sections()
+	if showFrom {
+		printBucket(lw, p, "only in "+fromLabel, refs(m.OnlyFrom), p.red)
 	}
-	for _, c := range differing {
-		lw.printf("  %s\n", p.yellow(c.ref))
-		for _, f := range c.fields {
-			lw.printf("      %s  %s → %s\n", f.Path, p.red(f.From), p.green(f.To))
+	if showTo {
+		printBucket(lw, p, "only in "+toLabel, refs(m.OnlyTo), p.green)
+	}
+	if showDiff {
+		lw.printf("\n%s\n", p.bold("differs:"))
+		if len(differing) == 0 {
+			lw.printf("  (none)\n")
+		}
+		for _, c := range differing {
+			lw.printf("  %s\n", p.yellow(c.ref))
+			for _, f := range c.fields {
+				lw.printf("      %s  %s → %s\n", f.Path, p.red(f.From), p.green(f.To))
+			}
 		}
 	}
 	return lw.err

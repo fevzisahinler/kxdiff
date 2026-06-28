@@ -107,6 +107,18 @@ func TestResolveBoth_ToError(t *testing.T) {
 	}
 }
 
+func TestViewSections(t *testing.T) {
+	if f, to, d := (viewOptions{}).sections(); !f || !to || !d {
+		t.Errorf("default should show all sections, got %v/%v/%v", f, to, d)
+	}
+	if f, to, d := (viewOptions{onlyDiff: true}).sections(); f || to || !d {
+		t.Errorf("only-diff should show diff only, got %v/%v/%v", f, to, d)
+	}
+	if f, to, d := (viewOptions{onlyFrom: true, onlyTo: true}).sections(); !f || !to || d {
+		t.Errorf("only-from+only-to should hide diff, got %v/%v/%v", f, to, d)
+	}
+}
+
 func TestPalette(t *testing.T) {
 	on := palette{enabled: true}
 	if got := on.red("x"); got != "\x1b[31mx\x1b[0m" {
