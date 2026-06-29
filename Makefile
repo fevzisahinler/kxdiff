@@ -1,4 +1,5 @@
-BINARY := kubectl-kxdiff
+BINARY := kxdiff
+PLUGIN := kubectl-kxdiff
 PKG    := ./...
 
 # Tool not on PATH but runnable without a global install, pinned at run time.
@@ -15,9 +16,10 @@ help:
 
 # --- build & run -------------------------------------------------------------
 
-## build: compile the kubectl plugin into ./bin
+## build: compile into ./bin/kxdiff (+ a kubectl-kxdiff symlink for the plugin)
 build:
 	go build -o bin/$(BINARY) ./cmd/kxdiff
+	@ln -sf $(BINARY) bin/$(PLUGIN)
 
 ## run: build then print --help
 run: build
