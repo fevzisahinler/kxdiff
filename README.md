@@ -16,7 +16,6 @@ markdown.
 It answers a question the usual tools don't: *"What exists in staging but not in
 prod — or exists in both but behaves differently?"*
 
-<!-- Recorded with VHS; regenerate with `vhs docs/demo.tape`. -->
 ![kxdiff demo](docs/demo.gif)
 
 ## Highlights
@@ -212,6 +211,8 @@ itself produces zero differences.
 | `--no-color`          | disable coloured output                                           |
 | `-q, --quiet`         | print nothing; rely on the exit code                             |
 | `--kubeconfig`        | path to the kubeconfig file                                       |
+| `-h, --help`          | show help                                                         |
+| `-v, --version`       | print version, commit and build date                             |
 
 ## Development
 
@@ -223,9 +224,6 @@ make lint      # golangci-lint
 make build     # build ./bin/kxdiff
 make check     # fmt + vet + lint + test + vuln
 ```
-
-A local two-cluster test bed (kind) lives under `test-clusters/`; run
-`./test-clusters/up.sh` to create it.
 
 ## License
 

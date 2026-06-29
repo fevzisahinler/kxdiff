@@ -42,3 +42,7 @@ kubeconfig
 # OS
 .DS_Store
 Thumbs.db
+
+# Local-only demo tooling (the recorded docs/demo.gif is committed; the VHS
+# script used to regenerate it is kept local)
+/docs/demo.tape
