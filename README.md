@@ -42,11 +42,13 @@ prod — or exists in both but behaves differently?"*
 The command is `kxdiff`. It is also a kubectl plugin: when the binary is on your
 `PATH`, kubectl runs it as `kubectl kxdiff`.
 
-### krew (kubectl plugin)
+### krew (custom index)
+
+kxdiff is distributed through its own [krew custom index](https://krew.sigs.k8s.io/docs/developer-guide/custom-indexes/):
 
 ```bash
-kubectl krew install kxdiff
-kubectl kxdiff --help
+kubectl krew index add kxdiff https://github.com/fevzisahinler/kxdiff.git
+kubectl krew install kxdiff/kxdiff
 ```
 
 ### Homebrew
